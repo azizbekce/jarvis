@@ -21,3 +21,4 @@ Modifications by **AZIZBEKCE / MEHNATKASH GROUP**.
 ## Icon
 
 `assets/JARVIS.ico` is generated from `assets/arc_reactor_source.png`, an AI-generated image.
+

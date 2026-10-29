@@ -132,6 +132,23 @@ def _detect_system_language() -> str:
     return "en"
 
 
+def _system_uses_12h() -> bool:
+    """True when the device's time format uses AM/PM (e.g. US regional settings)."""
+    try:
+        fmt = QLocale.system().timeFormat(QLocale.FormatType.ShortFormat)
+        return "ap" in fmt.lower()
+    except Exception:
+        return False
+
+
+def _system_date_month_first() -> bool:
+    """True for regions that write the month before the day (e.g. en_US)."""
+    try:
+        return QLocale.system().name().lower().startswith("en_us")
+    except Exception:
+        return False
+
+
 BASE_DIR = _base_dir()
 CONFIG_FILE = BASE_DIR / "config" / "api_keys.json"
 SETTINGS_FILE = APP_DATA_DIR / "settings.json"
@@ -1126,11 +1143,23 @@ class JarvisUI:
         if self.display_name:
             base_greeting = f"{base_greeting}, {self.display_name.split()[0]}"
         self.clock_greeting.setText(f"{sky_symbol}  {base_greeting}")
-        self.clock.setText(now.strftime("%H:%M:%S"))
+        use_12h = _system_uses_12h()
+        if use_12h:
+            self.clock.setText(
+                f"{now.hour % 12 or 12}:{now.minute:02d}:{now.second:02d} "
+                f"{'AM' if now.hour < 12 else 'PM'}"
+            )
+        else:
+            self.clock.setText(now.strftime("%H:%M:%S"))
         offset = now.strftime("%z")
         timezone = f"UTC{offset[:3]}:{offset[3:]}" if offset else now.tzname() or "LOCAL"
+        date_text = (
+            now.strftime("%a · %b %d")
+            if _system_date_month_first()
+            else now.strftime("%a · %d %b")
+        )
         self.clock_date.setText(
-            f"{now.strftime('%a · %d %b').upper()}   ·   WK {now.isocalendar().week}   ·   {timezone}"
+            f"{date_text.upper()}   ·   WK {now.isocalendar().week}   ·   {timezone}"
         )
         self.seconds_ring.set_progress(now.second)
 
