@@ -3,6 +3,7 @@ from datetime import datetime
 from threading import Lock
 from pathlib import Path
 import sys
+from config import APP_DATA_DIR
 
 
 def get_base_dir() -> Path:
@@ -12,7 +13,7 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR         = get_base_dir()
-MEMORY_PATH      = BASE_DIR / "memory" / "long_term.json"
+MEMORY_PATH      = APP_DATA_DIR / "memory" / "long_term.json"
 _lock            = Lock()
 MAX_VALUE_LENGTH = 380
 MEMORY_MAX_CHARS = 2200

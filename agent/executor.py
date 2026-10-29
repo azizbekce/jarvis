@@ -19,7 +19,9 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+from config import CONFIG_PATH
+
+API_CONFIG_PATH = CONFIG_PATH
 
 
 def _get_api_key() -> str:

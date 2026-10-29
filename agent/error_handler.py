@@ -12,7 +12,9 @@ def get_base_dir() -> Path:
 
 
 BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+from config import CONFIG_PATH
+
+API_CONFIG_PATH = CONFIG_PATH
 
 
 class ErrorDecision(Enum):
@@ -22,7 +24,7 @@ class ErrorDecision(Enum):
     ABORT       = "abort"    
 
 
-ERROR_ANALYST_PROMPT = """You are the error recovery module of MARK XXV AI assistant.
+ERROR_ANALYST_PROMPT = """You are the error recovery module of CE-21 AI assistant.
 
 A task step has failed. Analyze the error and decide what to do.
 

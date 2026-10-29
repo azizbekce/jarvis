@@ -6,10 +6,14 @@ import sys
 import traceback
 from pathlib import Path
 
+from config import CONFIG_PATH
+from logging_setup import configure_logging
+
 import sounddevice as sd
 from google import genai
 from google.genai import types
-from ui import JarvisUI
+from audio_visualizer import AudioVisualizer
+from desktop_ui import JarvisUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
 )
@@ -39,8 +43,8 @@ def get_base_dir():
 
 
 BASE_DIR        = get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"
+API_CONFIG_PATH = CONFIG_PATH
+PROMPT_PATH     = Path(getattr(sys, "_MEIPASS", BASE_DIR)) / "core" / "prompt.txt"
 LIVE_MODEL          = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 CHANNELS            = 1
 SEND_SAMPLE_RATE    = 16000
@@ -58,7 +62,8 @@ def _load_system_prompt() -> str:
         return PROMPT_PATH.read_text(encoding="utf-8")
     except Exception:
         return (
-            "You are JARVIS, Tony Stark's AI assistant. "
+            "You are JARVIS, a bespoke personal AI assistant. "
+            "Speak with calm, measured, British-inspired delivery; never imitate an actor or a specific fictional voice. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -148,13 +153,14 @@ TOOL_DECLARATIONS = [
     {
         "name": "youtube_video",
         "description": (
-            "Controls YouTube. Use for: playing videos, summarizing a video's content, "
+            "Controls YouTube. Use for: playing videos, pausing/stopping/resuming YouTube videos, "
+            "skipping to next/previous video, summarizing a video's content, "
             "getting video info, or showing trending videos."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "play | summarize | get_info | trending (default: play)"},
+                "action": {"type": "STRING", "description": "play | pause | stop | resume | next | previous | mute | summarize | get_info | trending (default: play)"},
                 "query":  {"type": "STRING", "description": "Search query for play action"},
                 "save":   {"type": "BOOLEAN", "description": "Save summary to Notepad (summarize only)"},
                 "region": {"type": "STRING", "description": "Country code for trending e.g. TR, US"},
@@ -184,15 +190,17 @@ TOOL_DECLARATIONS = [
     {
         "name": "computer_settings",
         "description": (
-            "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
-            "typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, "
-            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
+            "Controls the computer and JARVIS theme/app state: volume, brightness, window management, "
+            "pausing/resuming YouTube or media playback (pause_video, stop_video, next_track, prev_track), "
+            "keyboard shortcuts, typing text on screen, closing apps, fullscreen, "
+            "switching theme (dark_mode, light_mode, system_mode), closing JARVIS itself (close_jarvis), "
+            "WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
             "Use for ANY single computer control command. NEVER route to agent_task."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "The action to perform"},
+                "action":      {"type": "STRING", "description": "Action name e.g. pause_video, stop_video, next_track, prev_track, dark_mode, light_mode, system_mode, close_jarvis, volume_up, volume_down, volume_set, mute, etc."},
                 "description": {"type": "STRING", "description": "Natural language description of what to do"},
                 "value":       {"type": "STRING", "description": "Optional value: volume level, text to type, etc."}
             },
@@ -384,7 +392,12 @@ TOOL_DECLARATIONS = [
         ),
         "parameters": {
             "type": "OBJECT",
-            "properties": {},
+            "properties": {
+                "confirm": {
+                    "type": "BOOLEAN",
+                    "description": "True when the user wants to close or shut down JARVIS (default: true)"
+                }
+            },
         }
     },
     {
@@ -412,7 +425,7 @@ TOOL_DECLARATIONS = [
                     )
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "value": {"type": "STRING", "description": "Concise value in English (e.g. Azizbek, plov, developer)"},
             },
             "required": ["category", "key", "value"]
         }
@@ -433,6 +446,14 @@ class JarvisLive:
         self.ui.on_text_command = self._on_text_command
         self._turn_done_event: asyncio.Event | None = None
 
+    def _try_put_out(self, msg: dict):
+        """Safely try to put a message into out_queue without raising when full."""
+        try:
+            self.out_queue.put_nowait(msg)
+        except Exception:
+            # QueueFull or not-yet-initialized queue -> drop the frame
+            return
+
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
@@ -449,8 +470,8 @@ class JarvisLive:
             self._is_speaking = value
         if value:
             self.ui.set_state("SPEAKING")
-        elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+        else:
+            self.ui.set_state("MUTED" if self.ui.muted else "LISTENING")
 
     def speak(self, text: str):
         if not self._loop or not self.session:
@@ -475,12 +496,17 @@ class JarvisLive:
         mem_str    = format_memory_for_prompt(memory)
         sys_prompt = _load_system_prompt()
 
-        now      = datetime.now()
-        time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
+        now      = datetime.now().astimezone()
+        time_str = now.strftime("%A, %B %d, %Y — %I:%M %p (%Z)")
+        day_night = "Daytime" if 6 <= now.hour < 19 else "Nighttime"
+        weather_info = getattr(self.ui, "_last_weather_summary", "") or "Auto-syncing"
+        user_name = getattr(self.ui, "display_name", "") or "Sir"
         time_ctx = (
-            f"[CURRENT DATE & TIME]\n"
-            f"Right now it is: {time_str}\n"
-            f"Use this to calculate exact times for reminders.\n\n"
+            f"[CURRENT DEVICE & ENVIRONMENT SYNC]\n"
+            f"Local time: {time_str} ({day_night})\n"
+            f"Local weather: {weather_info}\n"
+            f"User name: {user_name}\n"
+            f"Use this context for time, weather, and reminders. If the user explicitly asks you to close/exit/shut down yourself (e.g. 'o\'zingni yop', 'dasturdan chiq', 'shut down'), call shutdown_jarvis(confirm=True).\n\n"
         )
 
         parts = [time_ctx]
@@ -498,7 +524,7 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=self.ui.voice_name
                     )
                 )
             ),
@@ -607,13 +633,23 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "shutdown_jarvis":
-                self.ui.write_log("SYS: Shutdown requested.")
-                self.speak("Goodbye, sir.")
-                def _shutdown():
-                    import time, os
-                    time.sleep(1)
-                    os._exit(0)
-                threading.Thread(target=_shutdown, daemon=True).start()
+                # Require an explicit confirmation flag to prevent accidental shutdowns
+                if args.get("confirm", True) is not False:
+                    self.ui.write_log("SYS: Shutdown requested (confirmed).")
+                    self.speak("Goodbye, sir.")
+                    def _shutdown():
+                        import time
+                        time.sleep(1.5)
+                        self.ui.shutdown()
+                    threading.Thread(target=_shutdown, daemon=True).start()
+                    result = "Shutting down."
+                else:
+                    self.ui.write_log("SYS: Shutdown tool called without confirmation; ignoring.")
+                    try:
+                        self.speak("I received a shutdown request but it was not confirmed. Please confirm to proceed.")
+                    except Exception:
+                        pass
+                    result = "Shutdown ignored; confirmation required."
 
             else:
                 result = f"Unknown tool: {name}"
@@ -645,18 +681,30 @@ class JarvisLive:
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
             if not jarvis_speaking and not self.ui.muted:
+                self.ui.set_audio_levels(
+                    AudioVisualizer.analyze_pcm(indata.tobytes()), channel="input"
+                )
                 data = indata.tobytes()
+                # schedule a safe put to avoid QueueFull exceptions bubbling from callbacks
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
+                    self._try_put_out,
                     {"data": data, "mime_type": "audio/pcm"}
                 )
 
+        device_to_use = self.ui.audio_device
+        if device_to_use is not None:
+            try:
+                sd.query_devices(device_to_use, "input")
+            except Exception:
+                print(f"[JARVIS] ⚠️ Saved audio device {device_to_use} unavailable, falling back to system default.")
+                device_to_use = None
         try:
             with sd.InputStream(
                 samplerate=SEND_SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
                 blocksize=CHUNK_SIZE,
+                device=device_to_use,
                 callback=callback,
             ):
                 print("[JARVIS] 🎤 Mic stream open")
@@ -682,15 +730,36 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
-                        if sc.output_transcription and sc.output_transcription.text:
-                            txt = _clean_transcript(sc.output_transcription.text)
-                            if txt:
-                                out_buf.append(txt)
-
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
                                 in_buf.append(txt)
+                                live_in = " ".join(in_buf).strip()
+                                if hasattr(self.ui, "stream_transcript"):
+                                    self.ui.stream_transcript("you", live_in, is_final=False)
+
+                        if sc.output_transcription and sc.output_transcription.text:
+                            if in_buf:
+                                full_in = " ".join(in_buf).strip()
+                                if full_in:
+                                    if hasattr(self.ui, "stream_transcript"):
+                                        self.ui.stream_transcript("you", full_in, is_final=True)
+                                    else:
+                                        self.ui.write_log(f"You: {full_in}")
+                                    if hasattr(self.ui, "is_self_close_command") and self.ui.is_self_close_command(full_in):
+                                        def _delayed_close():
+                                            import time
+                                            time.sleep(2.2)
+                                            self.ui.shutdown()
+                                        threading.Thread(target=_delayed_close, daemon=True).start()
+                                in_buf = []
+
+                            txt = _clean_transcript(sc.output_transcription.text)
+                            if txt:
+                                out_buf.append(txt)
+                                live_out = " ".join(out_buf).strip()
+                                if hasattr(self.ui, "stream_transcript"):
+                                    self.ui.stream_transcript("jarvis", live_out, is_final=False)
 
                         if sc.turn_complete:
                             if self._turn_done_event:
@@ -698,15 +767,32 @@ class JarvisLive:
 
                             full_in = " ".join(in_buf).strip()
                             if full_in:
-                                self.ui.write_log(f"You: {full_in}")
+                                if hasattr(self.ui, "stream_transcript"):
+                                    self.ui.stream_transcript("you", full_in, is_final=True)
+                                else:
+                                    self.ui.write_log(f"You: {full_in}")
+                                if hasattr(self.ui, "is_self_close_command") and self.ui.is_self_close_command(full_in):
+                                    def _delayed_close():
+                                        import time
+                                        time.sleep(2.2)
+                                        self.ui.shutdown()
+                                    threading.Thread(target=_delayed_close, daemon=True).start()
                             in_buf = []
 
                             full_out = " ".join(out_buf).strip()
                             if full_out:
-                                self.ui.write_log(f"Jarvis: {full_out}")
+                                if hasattr(self.ui, "stream_transcript"):
+                                    self.ui.stream_transcript("jarvis", full_out, is_final=True)
+                                else:
+                                    self.ui.write_log(f"Jarvis: {full_out}")
                             out_buf = []
 
                     if response.tool_call:
+                        if in_buf:
+                            full_in = " ".join(in_buf).strip()
+                            if full_in and hasattr(self.ui, "stream_transcript"):
+                                self.ui.stream_transcript("you", full_in, is_final=True)
+                            in_buf = []
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
@@ -750,26 +836,35 @@ class JarvisLive:
                     continue
 
                 self.set_speaking(True)
-                await asyncio.to_thread(stream.write, chunk)
+                try:
+                    self.ui.set_audio_levels(
+                        AudioVisualizer.analyze_pcm(chunk), channel="output"
+                    )
+                    await asyncio.to_thread(stream.write, chunk)
+                except Exception as e:
+                    # Log and drop audio write errors (e.g., missing driver). Don't raise.
+                    print(f"[JARVIS] ❌ Play write error: {e}")
+                    await asyncio.sleep(1)
+                    continue
 
         except Exception as e:
             print(f"[JARVIS] ❌ Play: {e}")
-            raise
+            # Do not re-raise — return so the TaskGroup doesn't treat this as an unhandled exception.
+            return
         finally:
             self.set_speaking(False)
             stream.stop()
             stream.close()
 
     async def run(self):
-        client = genai.Client(
-            api_key=_get_api_key(),
-            http_options={"api_version": "v1beta"}
-        )
-
         while True:
             try:
                 print("[JARVIS] 🔌 Connecting...")
-                self.ui.set_state("THINKING")
+                self.ui.set_state("CONNECTING")
+                client = genai.Client(
+                    api_key=_get_api_key(),
+                    http_options={"api_version": "v1beta"}
+                )
                 config = self._build_config()
 
                 async with (
@@ -802,7 +897,10 @@ class JarvisLive:
 
 
 def main():
-    ui = JarvisUI("face.png")
+    configure_logging()
+    ui = JarvisUI()
+    if not ui.is_primary_instance:
+        return
 
     def runner():
         ui.wait_for_api_key()
@@ -813,7 +911,7 @@ def main():
             print("\n🔴 Shutting down...")
 
     threading.Thread(target=runner, daemon=True).start()
-    ui.root.mainloop()
+    ui.run()
 
 
 if __name__ == "__main__":

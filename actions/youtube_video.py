@@ -33,7 +33,9 @@ def _get_base_dir() -> Path:
 
 
 BASE_DIR        = _get_base_dir()
-API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
+from config import CONFIG_PATH
+
+API_CONFIG_PATH = CONFIG_PATH
 
 HEADERS = {
     "User-Agent": (
@@ -389,11 +391,52 @@ def _handle_trending(parameters: dict, player, speak) -> str:
 
     return result
 
+def _send_media_key(vk_code: int, fallback_key: str = "playpause") -> None:
+    if is_windows():
+        try:
+            import ctypes
+            ctypes.windll.user32.keybd_event(vk_code, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(vk_code, 0, 2, 0)
+            return
+        except Exception:
+            pass
+    try:
+        pyautogui.press(fallback_key)
+    except Exception:
+        pyautogui.press("space")
+
+
+def _handle_media_control(action: str, player=None, speak=None) -> str:
+    if action in ("pause", "stop", "play_pause", "resume", "toggle"):
+        _send_media_key(0xB3, "playpause")
+        msg = "YouTube video paused/resumed, sir."
+    elif action in ("next", "skip", "next_video"):
+        _send_media_key(0xB0, "nexttrack")
+        msg = "Skipped to the next video, sir."
+    elif action in ("previous", "prev", "prev_video"):
+        _send_media_key(0xB1, "prevtrack")
+        msg = "Returned to the previous video, sir."
+    elif action == "mute":
+        _send_media_key(0xAD, "volumemute")
+        msg = "Toggled audio mute, sir."
+    else:
+        _send_media_key(0xB3, "playpause")
+        msg = "YouTube playback toggled, sir."
+    if player:
+        player.write_log(f"[YouTube] Media control: {action}")
+    return msg
+
+
 _ACTION_MAP = {
     "play":      _handle_play,
     "summarize": _handle_summarize,
     "get_info":  _handle_get_info,
     "trending":  _handle_trending,
+}
+
+_MEDIA_ACTIONS = {
+    "pause", "stop", "resume", "play_pause", "toggle",
+    "next", "skip", "next_video", "previous", "prev", "prev_video", "mute",
 }
 
 
@@ -406,16 +449,23 @@ def youtube_video(
 ) -> str:
     params = parameters or {}
     action = params.get("action", "play").lower().strip()
+    query = params.get("query", "").strip()
+
+    if action == "play" and not query:
+        action = "play_pause"
 
     if player:
         player.write_log(f"[YouTube] Action: {action}")
     print(f"[YouTube] ▶️  Action: {action}  Params: {params}")
 
+    if action in _MEDIA_ACTIONS:
+        return _handle_media_control(action, player=player, speak=speak)
+
     handler = _ACTION_MAP.get(action)
     if handler is None:
         return (
             f"Unknown YouTube action: '{action}'. "
-            "Available: play, summarize, get_info, trending."
+            "Available: play, pause, stop, resume, next, previous, summarize, get_info, trending."
         )
 
     try:

@@ -29,7 +29,9 @@ def _get_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 def _get_api_key() -> str:
-    path = _get_base_dir() / "config" / "api_keys.json"
+    from config import CONFIG_PATH
+
+    path = CONFIG_PATH
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
@@ -242,7 +244,31 @@ def focus_search():
     if _OS == "Darwin": pyautogui.hotkey("command", "l")
     else:               pyautogui.hotkey("ctrl", "l")
 
-def pause_video():      pyautogui.press("space")
+def _send_media_vk(vk_code: int, fallback_key: str = "playpause"):
+    if _OS == "Windows":
+        try:
+            import ctypes
+            ctypes.windll.user32.keybd_event(vk_code, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(vk_code, 0, 2, 0)
+            return
+        except Exception:
+            pass
+    try:
+        pyautogui.press(fallback_key)
+    except Exception:
+        pyautogui.press("space")
+
+
+def pause_video():
+    _send_media_vk(0xB3, "playpause")
+
+
+def next_track():
+    _send_media_vk(0xB0, "nexttrack")
+
+
+def prev_track():
+    _send_media_vk(0xB1, "prevtrack")
 
 def refresh_page():
     if _OS == "Darwin": pyautogui.hotkey("command", "r")
@@ -420,37 +446,62 @@ def open_run():
     if _OS == "Windows":
         pyautogui.hotkey("win", "r")
 
-def dark_mode():
-    if _OS == "Darwin":
-        subprocess.run(["osascript", "-e",
-            'tell app "System Events" to tell appearance preferences '
-            'to set dark mode to not dark mode'],
-            capture_output=True)
-    elif _OS == "Windows":
+def _set_windows_light_theme(use_light: int | None = None):
+    if _OS == "Windows":
         try:
             import winreg
             key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
-            current, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-            winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, 1 - current)
-            winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, 1 - current)
+            if use_light is None:
+                current, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                target = 1 - int(current)
+            else:
+                target = int(use_light)
+            winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, target)
+            winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, target)
             winreg.CloseKey(key)
         except Exception as e:
-            print(f"[Settings] dark_mode registry failed: {e}")
+            print(f"[Settings] Windows theme registry update failed: {e}")
+
+
+def dark_mode():
+    if _OS == "Darwin":
+        subprocess.run(["osascript", "-e",
+            'tell app "System Events" to tell appearance preferences '
+            'to set dark mode to true'],
+            capture_output=True)
+    elif _OS == "Windows":
+        _set_windows_light_theme(0)
     else:
         try:
-            result = subprocess.run(
-                ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-                capture_output=True, text=True
-            )
-            current = result.stdout.strip()
-            new_scheme = "'default'" if "dark" in current else "'prefer-dark'"
             subprocess.run(
-                ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", new_scheme],
+                ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "'prefer-dark'"],
                 capture_output=True
             )
         except Exception as e:
             print(f"[Settings] dark_mode Linux failed: {e}")
+
+
+def light_mode():
+    if _OS == "Darwin":
+        subprocess.run(["osascript", "-e",
+            'tell app "System Events" to tell appearance preferences '
+            'to set dark mode to false'],
+            capture_output=True)
+    elif _OS == "Windows":
+        _set_windows_light_theme(1)
+    else:
+        try:
+            subprocess.run(
+                ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", "'default'"],
+                capture_output=True
+            )
+        except Exception as e:
+            print(f"[Settings] light_mode Linux failed: {e}")
+
+
+def system_mode():
+    pass
 
 def toggle_wifi():
     if _OS == "Darwin":
@@ -512,7 +563,13 @@ ACTION_MAP: dict[str, callable] = {
     "sleep_display":       sleep_display,
     "screen_off":          sleep_display,
     "pause_video":         pause_video,
+    "stop_video":          pause_video,
+    "resume_video":        pause_video,
     "play_pause":          pause_video,
+    "next_track":          next_track,
+    "next_video":          next_track,
+    "prev_track":          prev_track,
+    "prev_video":          prev_track,
     "close_app":           close_app,
     "close_window":        close_window,
     "full_screen":         full_screen,
@@ -558,6 +615,8 @@ ACTION_MAP: dict[str, callable] = {
     "file_explorer":       open_file_explorer,
     "open_run":            open_run,
     "dark_mode":           dark_mode,
+    "light_mode":          light_mode,
+    "system_mode":         system_mode,
     "toggle_wifi":         toggle_wifi,
     "restart":             restart_computer,
     "shutdown":            shutdown_computer,
@@ -675,6 +734,11 @@ def computer_settings(
     if action == "scroll_down":
         scroll_down(int(value or 500))
         return "Scrolled down."
+
+    if action in ("close_jarvis", "quit_jarvis", "exit_jarvis", "self_close"):
+        if player and hasattr(player, "request_quit"):
+            player.request_quit()
+            return "Closing J.A.R.V.I.S. now, sir."
 
     func = ACTION_MAP.get(action)
     if not func:
