@@ -63,7 +63,8 @@ def _load_system_prompt() -> str:
     except Exception:
         return (
             "You are JARVIS, a bespoke personal AI assistant. "
-            "Speak with calm, measured, British-inspired delivery; never imitate an actor or a specific fictional voice. "
+            "Speak like the classic film J.A.R.V.I.S.: refined British cadence, calm, composed, dignified, with subtle dry wit; address the user as 'Sir'. "
+            "Keep exactly the same calm, low-mid voice in every turn and every language (Uzbek, Russian, English); never change pitch, tempo or persona. "
             "Be concise, direct, and always use the provided tools to complete tasks. "
             "Never simulate or guess results — always call the appropriate tool."
         )
@@ -444,7 +445,24 @@ class JarvisLive:
         self._is_speaking   = False
         self._speaking_lock = threading.Lock()
         self.ui.on_text_command = self._on_text_command
+        self.ui.on_settings_changed = self._on_settings_changed
         self._turn_done_event: asyncio.Event | None = None
+        self._active_voice: str | None = None
+        self._restart_event: asyncio.Event | None = None
+        self._restart_requested = False
+
+    def _on_settings_changed(self):
+        """Reconnect live session immediately if voice is changed in settings."""
+        if self._active_voice is None or self.ui.voice_name == self._active_voice:
+            return
+        if self._loop and self._restart_event:
+            print(f"[JARVIS] 🔁 Voice changed to {self.ui.voice_name}, reconnecting session...")
+            self._loop.call_soon_threadsafe(self._restart_event.set)
+
+    async def _watch_restart(self):
+        await self._restart_event.wait()
+        self._restart_requested = True
+        raise RuntimeError("Voice changed, restarting session.")
 
     def _try_put_out(self, msg: dict):
         """Safely try to put a message into out_queue without raising when full."""
@@ -866,6 +884,8 @@ class JarvisLive:
                     http_options={"api_version": "v1beta"}
                 )
                 config = self._build_config()
+                self._active_voice = self.ui.voice_name
+                self._restart_requested = False
 
                 async with (
                     client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
@@ -876,6 +896,7 @@ class JarvisLive:
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue      = asyncio.Queue(maxsize=10)
                     self._turn_done_event = asyncio.Event()
+                    self._restart_event   = asyncio.Event()
 
                     print("[JARVIS] ✅ Connected.")
                     self.ui.set_state("LISTENING")
@@ -885,8 +906,13 @@ class JarvisLive:
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
                     tg.create_task(self._play_audio())
+                    tg.create_task(self._watch_restart())
 
             except Exception as e:
+                if self._restart_requested:
+                    self.set_speaking(False)
+                    self.ui.write_log(f"SYS: Voice → {self.ui.voice_name}")
+                    continue
                 print(f"[JARVIS] ⚠️ {e}")
                 traceback.print_exc()
 

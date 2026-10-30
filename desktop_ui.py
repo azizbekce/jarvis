@@ -575,9 +575,9 @@ class JarvisUI:
             self.accent_name = "Cyan"
         self.reduced_motion = bool(self._settings.get("reduced_motion", False))
         self.audio_device = self._settings.get("audio_device")
-        self.voice_name = self._settings.get("voice", "Charon")
+        self.voice_name = self._settings.get("voice", "Fenrir")
         if self.voice_name not in VOICE_PRESETS:
-            self.voice_name = "Charon"
+            self.voice_name = "Fenrir"
         self.launch_at_startup = bool(self._settings.get("launch_at_startup", False))
         self.matrix_enabled = bool(self._settings.get("matrix_enabled", True))
         self.matrix_intensity = max(0, min(100, int(self._settings.get("matrix_intensity", 55))))
@@ -1336,7 +1336,7 @@ class JarvisUI:
         self.accent_name = accent_name if accent_name in ACCENTS else "Cyan"
         self.reduced_motion = reduced_motion
         self.audio_device = audio_device
-        self.voice_name = voice_name if voice_name in VOICE_PRESETS else "Charon"
+        self.voice_name = voice_name if voice_name in VOICE_PRESETS else "Fenrir"
         self.launch_at_startup = launch_at_startup
         self.matrix_enabled = matrix_enabled
         self.matrix_intensity = max(0, min(100, matrix_intensity))
